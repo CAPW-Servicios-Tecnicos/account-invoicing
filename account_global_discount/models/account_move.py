@@ -23,6 +23,7 @@ class AccountMove(models.Model):
         column1="invoice_id",
         column2="global_discount_id",
         string="Invoice Global Discounts",
+        ondelete='restrict',
         domain="[('discount_scope', 'in', {"
         "    'out_invoice': ['sale'], "
         "    'out_refund': ['sale'], "
