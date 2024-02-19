@@ -8,7 +8,7 @@
     "author": "GRAP," "Therp BV," "Tecnativa," "Odoo Community Association (OCA)",
     "website": "https://github.com/OCA/account-invoicing",
     "license": "AGPL-3",
-    "depends": ["account"],
+    "depends": ["account", 'l10n_do_accounting'],
     "data": ["views/account_invoice_view.xml"],
     "installable": True,
 }
