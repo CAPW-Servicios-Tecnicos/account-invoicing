@@ -9,5 +9,5 @@ class AccountInvoiceReport(models.Model):
         where_str = super()._where()
         return where_str.replace(
             "NOT line.exclude_from_invoice_tab",
-            "(NOT line.exclude_from_invoice_tab OR global_discount_item)",
+            "(NOT line.exclude_from_invoice_tab OR global_discount_item = true)",
         )

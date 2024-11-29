@@ -2,44 +2,52 @@
 # Copyright 2020 Tecnativa - Pedro M. Baeza
 # Copyright 2021 Tecnativa - Víctor Martínez
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl).
+
 from odoo import exceptions
-from odoo.tests import Form, common
+from odoo.tests import Form, tagged
+
+from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 
 
-class TestGlobalDiscount(common.SavepointCase):
+@tagged("post_install", "-at_install")
+class TestGlobalDiscount(AccountTestInvoicingCommon):
     @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls.account_type = cls.env["account.account.type"].create(
-            {"name": "Test", "type": "other", "internal_group": "income"}
+    def setUpClass(cls, chart_template_ref=None):
+        super().setUpClass(chart_template_ref=chart_template_ref)
+        cls.env.ref("base_global_discount.group_global_discount").write(
+            {"users": [(4, cls.env.user.id)]}
+        )
+        cls.currency_eur = cls.env.ref("base.EUR")
+        cls.currency_usd = cls.env.ref("base.USD")
+        cls.currency_usd.active = True
+        # Make sure the currency of the company is USD, as this not always happens
+        # To be removed in V17: https://github.com/odoo/odoo/pull/107113
+        cls.company = cls.env.company
+        cls.env.cr.execute(
+            "UPDATE res_company SET currency_id = %s WHERE id = %s",
+            (cls.env.ref("base.USD").id, cls.company.id),
         )
         cls.account = cls.env["account.account"].create(
             {
                 "name": "Test account",
                 "code": "TEST",
-                "user_type_id": cls.account_type.id,
+                "account_type": "income_other",
                 "reconcile": True,
             }
-        )
-        cls.account_type_receivable = cls.env["account.account.type"].create(
-            {"name": "Test", "type": "receivable", "internal_group": "income"}
         )
         cls.account_receivable = cls.env["account.account"].create(
             {
                 "name": "Test receivable account",
                 "code": "ACCRV",
-                "user_type_id": cls.account_type_receivable.id,
+                "account_type": "asset_receivable",
                 "reconcile": True,
             }
-        )
-        cls.account_type_payable = cls.env["account.account.type"].create(
-            {"name": "Test", "type": "payable", "internal_group": "income"}
         )
         cls.account_payable = cls.env["account.account"].create(
             {
                 "name": "Test receivable account",
                 "code": "ACCPAY",
-                "user_type_id": cls.account_type_payable.id,
+                "account_type": "liability_payable",
                 "reconcile": True,
             }
         )
@@ -86,29 +94,25 @@ class TestGlobalDiscount(common.SavepointCase):
             }
         )
         cls.partner_2.supplier_global_discount_ids = cls.global_discount_2
-        cls.tax = cls.env["account.tax"].create(
-            {
-                "name": "TAX 15%",
-                "amount_type": "percent",
-                "type_tax_use": "purchase",
-                "amount": 15.0,
-            }
-        )
-        cls.tax_0 = cls.env["account.tax"].create(
-            {
-                "name": "TAX 0%",
-                "amount_type": "percent",
-                "type_tax_use": "purchase",
-                "amount": 0.0,
-            }
-        )
+        cls.tax = cls.tax_purchase_a
+        cls.tax.amount = 15
+        cls.tax_0 = cls.tax_purchase_b
+        cls.tax_0.amount = 0
         cls.journal = cls.env["account.journal"].create(
             {"name": "Test purchase journal", "code": "TPUR", "type": "purchase"}
+        )
+        cls.product_3 = cls.env["product.product"].create(
+            {
+                "name": "Test Product 3",
+                "type": "service",
+                "bypass_global_discount": True,
+            }
         )
         cls.invoice_line = cls.env["account.move.line"]
         invoice_form = Form(
             cls.env["account.move"].with_context(
-                default_type="in_invoice", test_account_global_discount=True,
+                default_move_type="in_invoice",
+                test_account_global_discount=True,
             )
         )
         invoice_form.partner_id = cls.partner_1
@@ -119,6 +123,13 @@ class TestGlobalDiscount(common.SavepointCase):
             line_form.quantity = 1
             line_form.tax_ids.clear()
             line_form.tax_ids.add(cls.tax)
+        with invoice_form.invoice_line_ids.new() as line_form:
+            line_form.name = "Line 1"
+            line_form.product_id = cls.product_3
+            line_form.price_unit = 200.0
+            line_form.quantity = 1
+            line_form.tax_ids.clear()
+            line_form.tax_ids.add(cls.tax_0)
         cls.invoice = invoice_form.save()
 
     def test_01_global_invoice_succesive_discounts(self):
@@ -128,7 +139,7 @@ class TestGlobalDiscount(common.SavepointCase):
         self.assertAlmostEqual(invoice_tax_line.tax_base_amount, 200.0)
         self.assertAlmostEqual(invoice_tax_line.balance, 30.0)
         # Global discounts are applied to the base and taxes are recomputed:
-        # 200 - 50% (global disc. 1) =  100
+        # 200 - 50% (global disc. 3) =  100
         with Form(self.invoice) as invoice_form:
             invoice_form.global_discount_ids.clear()
             invoice_form.global_discount_ids.add(self.global_discount_3)
@@ -191,14 +202,7 @@ class TestGlobalDiscount(common.SavepointCase):
         self.assertAlmostEqual(self.invoice.amount_global_discount, -60.0)
 
     def test_03_multiple_taxes_multi_line(self):
-        tax2 = self.env["account.tax"].create(
-            {
-                "name": "TAX 20% 2",
-                "amount_type": "percent",
-                "type_tax_use": "purchase",
-                "amount": 20.0,
-            }
-        )
+        tax2 = self.tax.copy(default={"amount": 20.0, "name": "Tax 2"})
         with Form(self.invoice) as invoice_form:
             invoice_form.global_discount_ids.add(self.global_discount_1)
             with invoice_form.invoice_line_ids.new() as line_form:
@@ -230,21 +234,18 @@ class TestGlobalDiscount(common.SavepointCase):
         # Check journal items validity
         lines = self.invoice.line_ids
         line_15 = lines.filtered(
-            lambda x: x.global_discount_item and x.tax_ids == self.tax
+            lambda x: x.invoice_global_discount_id and x.tax_ids == self.tax
         )
         self.assertAlmostEqual(line_15.credit, 40)
-        line_20 = lines.filtered(lambda x: x.global_discount_item and x.tax_ids == tax2)
+        line_20 = lines.filtered(
+            lambda x: x.invoice_global_discount_id and x.tax_ids == tax2
+        )
         self.assertAlmostEqual(line_20.credit, 20)
 
     def test_04_multiple_taxes_same_line(self):
-        tax2 = self.env["account.tax"].create(
-            {
-                "name": "Retention 20%",
-                "amount_type": "percent",
-                "type_tax_use": "purchase",
-                "amount": -20.0,  # negative for testing more use cases
-            }
-        )
+        tax2 = self.tax.copy(
+            default={"amount": -20.0, "name": "Tax 2"}
+        )  # negative for testing more use cases
         with Form(self.invoice.with_context(check_move_validity=False)) as invoice_form:
             invoice_form.global_discount_ids.add(self.global_discount_1)
             with invoice_form.invoice_line_ids.edit(0) as line_form:
@@ -273,14 +274,9 @@ class TestGlobalDiscount(common.SavepointCase):
     def test_05_incompatible_taxes(self):
         # Line 1 with tax and tax2
         # Line 2 with only tax2
-        tax2 = self.env["account.tax"].create(
-            {
-                "name": "Retention 20%",
-                "amount_type": "percent",
-                "type_tax_use": "purchase",
-                "amount": -20.0,  # negative for testing more use cases
-            }
-        )
+        tax2 = self.tax.copy(
+            default={"amount": -20.0, "name": "Tax 2"}
+        )  # negative for testing more use cases
         with self.assertRaises(exceptions.UserError):
             with Form(self.invoice) as invoice_form:
                 invoice_form.global_discount_ids.add(self.global_discount_1)
@@ -338,28 +334,30 @@ class TestGlobalDiscount(common.SavepointCase):
                 "sequence": 1,
             }
         )
-        tax = self.env["account.tax"].create(
-            {
-                "name": "TAX 15% Sales",
-                "amount_type": "percent",
-                "type_tax_use": "sale",
-                "amount": 15.0,
-            }
-        )
-        invoice_form = Form(
-            self.env["account.move"].with_context(
-                default_type="out_invoice", test_account_global_discount=True,
+        tax = self.tax_sale_a.copy(default={"amount": 15.0, "name": "Tax 2"})
+        invoice = (
+            self.env["account.move"]
+            .with_context(test_account_global_discount=True)
+            .create(
+                {
+                    "move_type": "out_invoice",
+                    "partner_id": self.partner_1.id,
+                    "global_discount_ids": [(6, 0, global_discount.ids)],
+                    "invoice_line_ids": [
+                        (
+                            0,
+                            0,
+                            {
+                                "name": "Line 1",
+                                "price_unit": 200.0,
+                                "quantity": 1,
+                                "tax_ids": [(6, 0, tax.ids)],
+                            },
+                        )
+                    ],
+                }
             )
         )
-        invoice_form.partner_id = self.partner_1
-        invoice_form.global_discount_ids.add(global_discount)
-        with invoice_form.invoice_line_ids.new() as line_form:
-            line_form.name = "Line 1"
-            line_form.price_unit = 200.0
-            line_form.quantity = 1
-            line_form.tax_ids.clear()
-            line_form.tax_ids.add(tax)
-        invoice = invoice_form.save()
         self.assertEqual(len(invoice.invoice_global_discount_ids), 1)
         invoice_tax_line = invoice.line_ids.filtered("tax_line_id")
         self.assertAlmostEqual(invoice_tax_line.tax_base_amount, 100.0)
@@ -369,5 +367,117 @@ class TestGlobalDiscount(common.SavepointCase):
         self.assertAlmostEqual(invoice.amount_global_discount, -100.0)
         # Check journal item validity
         lines = invoice.line_ids
-        line_15 = lines.filtered(lambda x: x.global_discount_item and x.tax_ids == tax)
+        line_15 = lines.filtered(
+            lambda x: x.invoice_global_discount_id and x.tax_ids == tax
+        )
         self.assertAlmostEqual(line_15.debit, 100)
+
+    def test_10_customer_invoice_currency(self):
+        """Multi-currency"""
+        eur = self.env.ref("base.EUR")
+        usd = self.env.ref("base.USD")
+        self.assertEqual(self.env.user.company_id.currency_id, usd)
+        with Form(self.invoice) as invoice_form:
+            invoice_form.currency_id = eur
+        invoice = invoice_form.save()
+        self.assertAlmostEqual(invoice.amount_total, 230.0)
+        self.assertAlmostEqual(invoice.amount_untaxed, 200.0)
+        self.assertAlmostEqual(invoice.amount_global_discount, 0)
+        base_line = invoice.line_ids.filtered(
+            lambda line: (
+                line.tax_ids
+                and not line.invoice_global_discount_id
+                and not line.product_id
+            )
+        )
+        self.assertEqual(len(base_line), 1)
+        self.assertAlmostEqual(
+            base_line.balance,
+            eur._convert(
+                invoice.amount_untaxed, usd, self.env.user.company_id, invoice.date
+            ),
+        )
+        tax_line = invoice.line_ids.filtered(
+            lambda line: line.tax_line_id and not line.invoice_global_discount_id
+        )
+        self.assertEqual(len(tax_line), 1)
+        tax_line_balance_before_discount = tax_line.balance
+        self.assertAlmostEqual(
+            tax_line_balance_before_discount,
+            eur._convert(
+                invoice.amount_untaxed * (self.tax.amount / 100),
+                usd,
+                self.env.user.company_id,
+                invoice.date,
+            ),
+        )
+        self.assertAlmostEqual(
+            tax_line.tax_base_amount,
+            eur._convert(
+                invoice.amount_untaxed,
+                usd,
+                self.env.user.company_id,
+                invoice.date,
+            ),
+        )
+        discount_line = invoice.line_ids.filtered("invoice_global_discount_id")
+        self.assertFalse(discount_line)
+        with Form(self.invoice) as invoice_form:
+            invoice_form.global_discount_ids.add(self.global_discount_1)
+        invoice = invoice_form.save()
+        # Check that when we add a global discount it will be based on the
+        # correct currency
+        self.assertAlmostEqual(invoice.amount_total, 184)
+        self.assertAlmostEqual(invoice.amount_untaxed, 160.0)
+        self.assertAlmostEqual(invoice.amount_global_discount, -40.0)
+        base_line = invoice.line_ids.filtered(
+            lambda line: (
+                line.tax_ids
+                and not line.invoice_global_discount_id
+                and not line.product_id
+            )
+        )
+        self.assertEqual(len(base_line), 1)
+        self.assertAlmostEqual(
+            base_line.balance,
+            eur._convert(
+                invoice.amount_untaxed_before_global_discounts,
+                usd,
+                self.env.user.company_id,
+                invoice.date,
+            ),
+        )
+        tax_line = invoice.line_ids.filtered(
+            lambda line: line.tax_line_id and not line.invoice_global_discount_id
+        )
+        self.assertEqual(len(tax_line), 1)
+        self.assertAlmostEqual(
+            tax_line.tax_base_amount,
+            eur._convert(
+                invoice.amount_untaxed,
+                usd,
+                self.env.user.company_id,
+                invoice.date,
+            ),
+        )
+        self.assertAlmostEqual(
+            tax_line.balance,
+            eur._convert(
+                invoice.amount_untaxed * (self.tax.amount / 100),
+                usd,
+                self.env.user.company_id,
+                invoice.date,
+            ),
+        )
+        self.assertLess(tax_line.balance, tax_line_balance_before_discount)
+        discount_line = invoice.line_ids.filtered("invoice_global_discount_id")
+        self.assertEqual(len(discount_line), 1)
+        self.assertAlmostEqual(
+            discount_line.balance,
+            eur._convert(
+                invoice.amount_global_discount,
+                usd,
+                self.env.user.company_id,
+                invoice.date,
+            ),
+        )

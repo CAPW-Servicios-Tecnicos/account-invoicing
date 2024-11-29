@@ -3,7 +3,7 @@
 # License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl.html).
 {
     "name": "Account Global Discount",
-    "version": "13.0.2.0.3",
+    "version": "17.0.1.0.0",
     "category": "Accounting",
     "author": "Tecnativa, Odoo Community Association (OCA)",
     "website": "https://github.com/OCA/account-invoicing",
@@ -18,4 +18,5 @@
     ],
     "application": False,
     "installable": True,
+    "pre_init_hook": "_pre_init_global_discount_fields",
 }
